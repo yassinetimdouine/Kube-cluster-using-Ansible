@@ -1,0 +1,155 @@
+
+#Step 1: Install Docker and its dependent components.
+---
+- hosts: master
+  become: true
+  tasks:
+  - name: Install packages that allow apt to be used over HTTPS
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      #- apt-transport-httpsa
+      - python-apt
+      - ca-certificates
+      - curl
+      - gnupg-agent
+      - software-properties-common
+
+  - name: Add an apt signing key for Docker
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+
+  - name: Add apt repository for stable version
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable
+      state: present
+
+  - name: Install docker and its dependecies
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+    notify:
+      - docker status
+
+  - name: Add vagrant user to docker group
+    user:
+      name: vagrant
+      group: docker
+
+#Step 2: Kubelet will not start if the system has swap enabled, so we are disabling swap using the below code.
+
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+
+#Step 3: Installing kubelet, kubeadm and kubectl using the below code.
+
+  - name: Add an apt signing key for Kubernetes
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Adding apt repository for Kubernetes
+    apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
+      filename: kubernetes.list
+
+  - name: Install Kubernetes binaries
+    apt:
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+  - name: create kubelet file
+    file:
+      path: /etc/default/kubelet
+      state: touch
+
+  - name: Configure node ip
+    lineinfile:
+      path: /etc/default/kubelet
+      line: KUBELET_EXTRA_ARGS=--node-ip=192.168.0.10
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+
+#Step 4: Initialize the Kubernetes cluster with kubeadm using the below code (applicable only on master node).
+
+  - name: Initialize the Kubernetes cluster using kubeadm
+    command: kubeadm init --apiserver-advertise-address="192.168.0.10" --apiserver-cert-extra-sans="192.168.0.10"
+    --node-name master --pod-network-cidr=192.168.0.0/16
+
+    kubeadm join 192.168.0.10:6443 --token 83ow3l.1zd4ayv39lt8zsty \
+    --discovery-token-ca-cert-hash sha256:eb149e183fb70cb0acc8093c50292b3261e2d725cb39e8d0cb5ee2f5b0f0ac9b
+
+    kubeadm join 192.168.0.10:6443 --token 8eu2jm.n1zaf4qjfhe6qvzt \
+    --discovery-token-ca-cert-hash sha256:9ca81830e3fd229322e513ee530d1f47627232f7b347445252b10edabd0c588e
+
+
+#Step 5: Setup the kube config file for the vagrant user to access the Kubernetes cluster using the below code.
+
+  - name: Setup kubeconfig for vagrant user
+    command: "{{ item }}"
+    with_items:
+      - mkdir -p /home/vagrant/.kube
+      - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+      - chown vagrant:vagrant /home/vagrant/.kube/config
+
+
+
+#Step 6: Setup the container networking provider and the network policy engine using the below code.
+
+  - name: Install calico pod network
+    become: false
+    command: kubectl create -f https://docs.projectcalico.org/v3.4/getting-started/kubernetes/installation/hosted/calico.yaml
+
+
+
+#Step 7: Generate kube join command for joining the node to the Kubernetes cluster and store the command in the file named join-command.
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+
+
+#Step 8: Setup a handler for checking Docker daemon using the below code.
+
+  handlers:
+    - name: docker status
+      service:
+        name: docker
+        state: started
